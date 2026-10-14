@@ -1,35 +1,43 @@
-import OpenAI from "openai";
+import {
+  GoogleGenerativeAI,
+  EmbedContentRequest,
+} from "@google/generative-ai";
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENROUTER_API_KEY || process.env.OPENAI_API_KEY,
-  baseURL: process.env.OPENROUTER_API_KEY
-    ? "https://openrouter.ai/api/v1"
-    : "https://api.openai.com/v1",
-});
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
 
-const EMBEDDING_MODEL = process.env.OPENROUTER_API_KEY
-  ? "openai/text-embedding-3-small"
-  : "text-embedding-3-small";
-const EMBEDDING_DIMENSIONS = 1536;
+// gemini-embedding-001 with Matryoshka-truncated output at 768 dimensions,
+// matching the pgvector schema in scripts/migrate-to-gemini.sql.
+// (text-embedding-004 is retired and no longer served by the Gemini API.)
+const EMBEDDING_MODEL = "gemini-embedding-001";
+const EMBEDDING_DIMENSIONS = 768;
+
+// The installed SDK's EmbedContentRequest type omits outputDimensionality,
+// but the REST API honors it — the SDK JSON-serializes the whole object.
+interface DimensionalEmbedRequest extends EmbedContentRequest {
+  outputDimensionality: number;
+}
+
+function embedRequest(text: string): DimensionalEmbedRequest {
+  return {
+    content: { role: "user", parts: [{ text }] },
+    outputDimensionality: EMBEDDING_DIMENSIONS,
+  };
+}
 
 export async function generateEmbedding(text: string): Promise<number[]> {
-  const response = await openai.embeddings.create({
-    model: EMBEDDING_MODEL,
-    input: text,
-    dimensions: EMBEDDING_DIMENSIONS,
-  });
-  return response.data[0].embedding;
+  const model = genAI.getGenerativeModel({ model: EMBEDDING_MODEL });
+  const result = await model.embedContent(embedRequest(text));
+  return result.embedding.values;
 }
 
 export async function generateEmbeddings(
   texts: string[]
 ): Promise<number[][]> {
-  const response = await openai.embeddings.create({
-    model: EMBEDDING_MODEL,
-    input: texts,
-    dimensions: EMBEDDING_DIMENSIONS,
+  const model = genAI.getGenerativeModel({ model: EMBEDDING_MODEL });
+  const result = await model.batchEmbedContents({
+    requests: texts.map(embedRequest),
   });
-  return response.data.map((d) => d.embedding);
+  return result.embeddings.map((e) => e.values);
 }
 
 export { EMBEDDING_DIMENSIONS };

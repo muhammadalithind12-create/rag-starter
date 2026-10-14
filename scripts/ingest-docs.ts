@@ -1,21 +1,25 @@
 /**
- * Document Ingestion Script
+ * Document Ingestion Script — SupportGenius
  *
- * Crawls web pages, extracts text, chunks them,
- * generates embeddings, and stores in Supabase pgvector.
+ * Ingests help articles into Supabase pgvector:
+ *   - from live web pages (crawls, extracts text, chunks)
+ *   - from a local JSON file (--json docs.json)
+ *
+ * Gemini embeddings (gemini-embedding-001, truncated to 768 dimensions).
  *
  * Usage:
  *   npx tsx scripts/ingest-docs.ts <url1> <url2> ...
  *   npx tsx scripts/ingest-docs.ts --file urls.txt
+ *   npx tsx scripts/ingest-docs.ts --json scripts/demo-docs.json
  *
  * Requires .env.local with:
- *   OPENROUTER_API_KEY or OPENAI_API_KEY
+ *   GEMINI_API_KEY
  *   NEXT_PUBLIC_SUPABASE_URL
  *   SUPABASE_SERVICE_ROLE_KEY
  */
 
 import { createClient } from "@supabase/supabase-js";
-import OpenAI from "openai";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 import * as cheerio from "cheerio";
 import { v4 as uuidv4 } from "uuid";
 import * as fs from "fs";
@@ -37,9 +41,8 @@ if (fs.existsSync(envPath)) {
 }
 
 // Validate required env vars
-const apiKey = process.env.OPENROUTER_API_KEY || process.env.OPENAI_API_KEY;
-if (!apiKey) {
-  console.error("ERROR: Set OPENROUTER_API_KEY or OPENAI_API_KEY in .env.local");
+if (!process.env.GEMINI_API_KEY) {
+  console.error("ERROR: Set GEMINI_API_KEY in .env.local");
   process.exit(1);
 }
 if (!process.env.NEXT_PUBLIC_SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
@@ -52,16 +55,22 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
 
-const useOpenRouter = !!process.env.OPENROUTER_API_KEY;
-const openai = new OpenAI({
-  apiKey,
-  baseURL: useOpenRouter ? "https://openrouter.ai/api/v1" : "https://api.openai.com/v1",
-});
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
+// gemini-embedding-001, truncated to 768 dims to match the pgvector schema
+// (text-embedding-004 is retired). outputDimensionality isn't in the SDK's
+// TS types but the REST API honors it — the SDK JSON-serializes the request.
+const embeddingModel = genAI.getGenerativeModel({ model: "gemini-embedding-001" });
+const EMBEDDING_DIMENSIONS = 768;
 
 const CHUNK_SIZE = 800;
 const CHUNK_OVERLAP = 200;
-const EMBEDDING_MODEL = useOpenRouter ? "openai/text-embedding-3-small" : "text-embedding-3-small";
 const BATCH_SIZE = 20;
+
+interface ArticleInput {
+  article_title: string;
+  source_url: string;
+  content: string;
+}
 
 function chunkText(
   content: string,
@@ -105,7 +114,7 @@ function chunkText(
   return chunks;
 }
 
-async function fetchArticle(url: string): Promise<{ title: string; content: string } | null> {
+async function fetchArticle(url: string): Promise<ArticleInput | null> {
   try {
     const res = await fetch(url, {
       headers: {
@@ -143,7 +152,7 @@ async function fetchArticle(url: string): Promise<{ title: string; content: stri
       return null;
     }
 
-    return { title, content: cleaned };
+    return { article_title: title, source_url: url, content: cleaned };
   } catch (err: any) {
     console.log(`  ERROR ${url} — ${err.message}`);
     return null;
@@ -151,63 +160,84 @@ async function fetchArticle(url: string): Promise<{ title: string; content: stri
 }
 
 async function generateEmbeddings(texts: string[]): Promise<number[][]> {
-  const res = await openai.embeddings.create({
-    model: EMBEDDING_MODEL,
-    input: texts,
-    dimensions: 1536,
+  const result = await embeddingModel.batchEmbedContents({
+    requests: texts.map((text) => ({
+      content: { role: "user", parts: [{ text }] },
+      outputDimensionality: EMBEDDING_DIMENSIONS,
+    })),
   });
-  return res.data.map((d) => d.embedding);
+  return result.embeddings.map((e) => e.values);
 }
 
-function getUrls(): string[] {
-  const args = process.argv.slice(2);
+function printUsageAndExit(): never {
+  console.error("Usage:");
+  console.error("  npx tsx scripts/ingest-docs.ts <url1> <url2> ...");
+  console.error("  npx tsx scripts/ingest-docs.ts --file urls.txt");
+  console.error("  npx tsx scripts/ingest-docs.ts --json scripts/demo-docs.json");
+  console.error("");
+  console.error("Example:");
+  console.error("  npx tsx scripts/ingest-docs.ts --json scripts/demo-docs.json");
+  process.exit(1);
+}
 
-  if (args.length === 0) {
-    console.error("Usage:");
-    console.error("  npx tsx scripts/ingest-docs.ts <url1> <url2> ...");
-    console.error("  npx tsx scripts/ingest-docs.ts --file urls.txt");
-    console.error("");
-    console.error("Example:");
-    console.error("  npx tsx scripts/ingest-docs.ts https://docs.example.com/getting-started https://docs.example.com/api");
-    process.exit(1);
+async function getArticles(): Promise<ArticleInput[]> {
+  const args = process.argv.slice(2);
+  if (args.length === 0) printUsageAndExit();
+
+  if (args[0] === "--json") {
+    const filePath = args[1];
+    if (!filePath || !fs.existsSync(filePath)) {
+      console.error(`ERROR: File not found: ${filePath}`);
+      process.exit(1);
+    }
+    const raw = JSON.parse(fs.readFileSync(filePath, "utf-8"));
+    const docs: ArticleInput[] = Array.isArray(raw) ? raw : raw.articles;
+    if (!Array.isArray(docs) || docs.length === 0) {
+      console.error("ERROR: JSON must be an array of {article_title, source_url, content}");
+      process.exit(1);
+    }
+    return docs.filter((d) => d.article_title && d.source_url && d.content);
   }
 
+  let urls: string[];
   if (args[0] === "--file") {
     const filePath = args[1];
     if (!filePath || !fs.existsSync(filePath)) {
       console.error(`ERROR: File not found: ${filePath}`);
       process.exit(1);
     }
-    return fs
+    urls = fs
       .readFileSync(filePath, "utf-8")
       .split("\n")
       .map((l) => l.trim())
       .filter((l) => l && !l.startsWith("#"));
+  } else {
+    urls = args;
   }
 
-  return args;
+  const articles: ArticleInput[] = [];
+  for (const url of urls) {
+    const article = await fetchArticle(url);
+    if (article) articles.push(article);
+    await new Promise((r) => setTimeout(r, 500)); // be respectful
+  }
+  return articles;
 }
 
-async function main() {
-  const urls = getUrls();
-
-  console.log("=== Document Ingestion ===\n");
-  console.log(`Processing ${urls.length} URL(s)...\n`);
+async function ingestArticles(articles: ArticleInput[]) {
+  console.log("=== Document Ingestion (SupportGenius) ===\n");
+  console.log(`Processing ${articles.length} article(s)...\n`);
 
   let totalChunks = 0;
   let articlesProcessed = 0;
 
-  for (const url of urls) {
-    console.log(`[${articlesProcessed + 1}/${urls.length}] ${url}`);
-
-    const article = await fetchArticle(url);
-    if (!article) continue;
-
-    console.log(`  Title: "${article.title}" (${article.content.length} chars)`);
+  for (const article of articles) {
+    console.log(`[${articlesProcessed + 1}/${articles.length}] ${article.source_url}`);
+    console.log(`  Title: "${article.article_title}" (${article.content.length} chars)`);
 
     const chunks = chunkText(article.content, {
-      source_url: url,
-      article_title: article.title,
+      source_url: article.source_url,
+      article_title: article.article_title,
     });
 
     console.log(`  Chunks: ${chunks.length}`);
@@ -237,13 +267,18 @@ async function main() {
 
     articlesProcessed++;
 
-    // Small delay to be respectful
+    // Small delay to respect API rate limits
     await new Promise((r) => setTimeout(r, 500));
   }
 
   console.log(`\n=== Done ===`);
   console.log(`Articles processed: ${articlesProcessed}`);
   console.log(`Total chunks stored: ${totalChunks}`);
+}
+
+async function main() {
+  const articles = await getArticles();
+  await ingestArticles(articles);
 }
 
 main().catch(console.error);

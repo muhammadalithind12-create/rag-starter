@@ -1,196 +1,98 @@
-# RAG Starter
+# SupportGenius
 
-Open-source RAG chatbot starter kit. Fork it, point it at your docs, deploy to Vercel.
+**AI support chatbot that answers from your docs — with citations.**
 
-**Stack:** Next.js + Supabase pgvector + OpenAI (or OpenRouter)
+SupportGenius is a production-style RAG (retrieval-augmented generation) customer-support chatbot. Point it at your help articles, and it answers customer questions grounded in your documentation — every answer citing the exact articles it used, and politely declining anything outside your docs.
 
-[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2Fabhipaddy8%2Frag-starter&env=NEXT_PUBLIC_SUPABASE_URL,SUPABASE_SERVICE_ROLE_KEY,OPENROUTER_API_KEY&envDescription=Set%20your%20Supabase%20and%20LLM%20provider%20keys.%20Use%20OPENROUTER_API_KEY%20or%20replace%20with%20OPENAI_API_KEY.&project-name=rag-starter)
+**Live demo:** `https://your-deployment.vercel.app` *(deploy and replace this link)*
 
-## Live Demo
+**Stack:** Next.js 16 · React 19 · Supabase pgvector · Google Gemini (chat + embeddings) · Tailwind CSS 4
 
-Try it now: **[rag-starter-one.vercel.app](https://rag-starter-one.vercel.app)**
-
-This demo is powered by Notion help articles — ask it anything about Notion and get cited answers instantly.
-
-| Empty State | Chat with Citations |
-|:-----------:|:-------------------:|
-| ![Empty state with suggested questions](public/demo-empty.png) | ![Chat response with source citations](public/demo-chat.png) |
+---
 
 ## How it works
 
 ```
-Your Docs → Chunking (800 chars) → Embeddings (text-embedding-3-small)
-→ Supabase pgvector → Cosine Similarity Search (top 5)
-→ LLM Answer + Citations (GPT-4o-mini) → Scope Guardrail
+Your docs → Chunking (800 chars, 200 overlap) → Gemini embeddings (gemini-embedding-001 (768d))
+→ Supabase pgvector (HNSW cosine index) → Top-5 similarity retrieval
+→ Gemini 3.5 Flash-Lite answer + citations → Scope guardrail
 ```
 
-**Features:**
-- Vector similarity search with citations
-- Scope enforcement — refuses questions outside your docs
-- One config file (`rag.config.ts`) to customize everything
-- Works with OpenAI direct or OpenRouter
-- Ingest via CLI (pass URLs) or REST API
-- Dark mode, mobile-friendly chat UI
+## Features
 
-## Quick Start
+- **Grounded answers with citations** — every response links the help articles it was built from
+- **Scope enforcement** — refuses off-topic questions instead of hallucinating
+- **Conversational memory** — follows up naturally using the last 6 turns of chat history
+- **Document ingestion pipeline** — crawl live URLs or bulk-load a JSON knowledge base (`npm run ingest`)
+- **One-file customization** — brand, tone, suggested questions, and model settings all live in `rag.config.ts`
+- **Zero-cost AI** — runs entirely on Gemini's free tier (no OpenAI billing required)
 
-### 1. Clone & install
+## Demo knowledge base
+
+The repo ships with `scripts/demo-docs.json`: 10 realistic help articles for **Nexora**, a fictional team-collaboration SaaS (getting started, pricing, Slack & Google integrations, roles & permissions, login troubleshooting, data export, keyboard shortcuts, SSO/security, mobile app). Load it with:
 
 ```bash
-git clone https://github.com/abhipaddy8/rag-starter.git
-cd rag-starter
+npm run ingest -- --json scripts/demo-docs.json
+```
+
+Then ask things like *"How does the Slack integration work?"* or *"What do the pricing plans include?"* and watch the citations appear.
+
+## Getting started
+
+### 1. Database
+
+In the [Supabase SQL editor](https://supabase.com/dashboard), run `scripts/setup-supabase.sql` (creates the `vector` extension, the `documents` table, the HNSW index, and the `match_documents()` function).
+
+> **Migrating from the OpenAI version?** Run `scripts/migrate-to-gemini.sql` instead — it resizes embeddings from 1536 to 768 dimensions and recreates the search function. (The table must be empty or re-ingested; vectors can't be cast across dimensions.)
+
+### 2. Environment variables
+
+Copy `.env.local.example` to `.env.local` and fill in:
+
+| Variable | Where to get it |
+|---|---|
+| `NEXT_PUBLIC_SUPABASE_URL` | Supabase dashboard → Project Settings → API |
+| `SUPABASE_SERVICE_ROLE_KEY` | Supabase dashboard → Project Settings → API |
+| `GEMINI_API_KEY` | Free at [Google AI Studio](https://aistudio.google.com) |
+
+### 3. Ingest docs & run
+
+```bash
 npm install
+npm run ingest -- --json scripts/demo-docs.json  # load the Nexora demo KB
+npm run dev                                       # open http://localhost:3000
 ```
 
-### 2. Set up Supabase
+### 4. Deploy
 
-1. Create a free project at [supabase.com](https://supabase.com)
-2. Go to **SQL Editor** in the Supabase dashboard
-3. Paste the contents of `scripts/setup-supabase.sql` and click **Run**
+Deploy to Vercel and set the same three environment variables in the project settings. No build-time secrets required.
 
-This creates:
-- `documents` table with pgvector embeddings
-- HNSW index for fast similarity search
-- `match_documents` RPC function
-
-### 3. Configure environment
-
-```bash
-cp .env.local.example .env.local
-```
-
-Fill in your keys:
-
-```env
-NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
-SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
-
-# Pick ONE:
-OPENROUTER_API_KEY=your-openrouter-key
-# OPENAI_API_KEY=your-openai-key
-```
-
-> **Note:** Never commit `.env.local` — it contains your secret keys. The `.gitignore` already excludes it.
-
-### 4. Ingest your docs
-
-**Option A — CLI script (recommended):**
-
-Pass URLs directly:
-
-```bash
-npx tsx scripts/ingest-docs.ts https://docs.example.com/getting-started https://docs.example.com/api
-```
-
-Or use a file with one URL per line:
-
-```bash
-npx tsx scripts/ingest-docs.ts --file urls.txt
-```
-
-You can also use the npm script shorthand:
-
-```bash
-npm run ingest -- https://docs.example.com/getting-started
-```
-
-**Option B — REST API:**
-
-```bash
-curl -X POST http://localhost:3000/api/ingest \
-  -H "Content-Type: application/json" \
-  -d '{
-    "documents": [{
-      "content": "Your document text here...",
-      "source_url": "https://example.com/doc",
-      "article_title": "Getting Started"
-    }]
-  }'
-```
-
-### 5. Customize & run
-
-Edit `rag.config.ts` to set your chatbot's name, system prompt, and suggested questions:
-
-```ts
-export const RAG_CONFIG = {
-  name: "Acme Support",
-  domain: "Acme products",
-  systemPrompt: "You are Acme's support bot...",
-  suggestedQuestions: ["How do I reset my password?", ...],
-};
-```
-
-```bash
-npm run dev
-```
-
-Open [http://localhost:3000](http://localhost:3000).
-
-## Project Structure
+## Project structure
 
 ```
-rag.config.ts              ← Customize everything here
-scripts/
-  setup-supabase.sql       ← Database schema (run once in Supabase SQL Editor)
-  ingest-docs.ts           ← CLI ingestion script (pass URLs as args)
-src/
-  app/
-    api/
-      chat/route.ts        ← Chat endpoint (retrieval + LLM)
-      ingest/route.ts      ← Document ingestion REST API
-      stats/route.ts       ← Health check / stats
-    page.tsx               ← Chat UI
-  components/
-    ChatWindow.tsx         ← Chat interface component
-  lib/
-    chunker.ts             ← Document chunking
-    embeddings.ts          ← OpenAI embedding generation
-    retriever.ts           ← Vector similarity search
-    llm.ts                 ← LLM answer generation + scope guard
-    supabase.ts            ← Supabase client
-  types/
-    index.ts               ← TypeScript types
+rag.config.ts            # Brand, prompts, suggested questions, model settings
+src/app/api/chat/route.ts    # Chat endpoint: retrieve → generate → respond
+src/app/api/ingest/route.ts  # HTTP ingestion endpoint
+src/app/api/stats/route.ts   # Knowledge-base stats endpoint
+src/lib/embeddings.ts    # Gemini gemini-embedding-001 (768d), single + batch
+src/lib/retriever.ts     # pgvector cosine-similarity retrieval
+src/lib/llm.ts           # Gemini 3.5 Flash-Lite chat with system instruction + history
+src/lib/chunker.ts       # Sentence-aware chunking with overlap
+src/components/ChatWindow.tsx  # Polished chat UI
+scripts/ingest-docs.ts   # CLI ingestion (URLs, URL files, or JSON)
+scripts/demo-docs.json   # 10-article Nexora demo knowledge base
+scripts/setup-supabase.sql     # Fresh database setup
+scripts/migrate-to-gemini.sql # OpenAI → Gemini migration
 ```
 
-## Configuration Reference
+## Customization
 
-All settings live in `rag.config.ts`:
+Everything customer-facing lives in `rag.config.ts`: chatbot name, tagline, domain description, system prompt, suggested questions, input placeholder, disclaimer, out-of-scope message, LLM model/temperature/max tokens, retrieval top-K and similarity threshold, and chunking size/overlap. Point the ingester at your own docs and you're live.
 
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `name` | "Help Chat" | Chatbot name shown in header |
-| `domain` | "your help docs" | What your chatbot knows about |
-| `systemPrompt` | Generic support bot | Controls LLM behavior |
-| `suggestedQuestions` | 6 generic questions | Empty state quick actions |
-| `llm.model` | "openai/gpt-4o-mini" | LLM model ID |
-| `llm.temperature` | 0.2 | Response creativity (0-1) |
-| `retrieval.topK` | 5 | Number of chunks to retrieve |
-| `retrieval.similarityThreshold` | 0.2 | Minimum cosine similarity |
-| `chunking.chunkSize` | 800 | Characters per chunk |
-| `chunking.chunkOverlap` | 200 | Overlap between chunks |
+## Attribution
 
-## Deploy to Vercel
-
-1. Push to GitHub
-2. Import in [Vercel](https://vercel.com/new)
-3. Add environment variables:
-   - `NEXT_PUBLIC_SUPABASE_URL`
-   - `SUPABASE_SERVICE_ROLE_KEY`
-   - `OPENROUTER_API_KEY` **or** `OPENAI_API_KEY`
-4. Deploy
-
-Your secret keys are server-side only — they are never exposed to the browser.
-
-## Tech Stack
-
-- **Framework:** Next.js 16 (App Router)
-- **Database:** Supabase (Postgres + pgvector)
-- **Embeddings:** text-embedding-3-small (1536 dimensions)
-- **LLM:** GPT-4o-mini (via OpenAI or OpenRouter)
-- **Styling:** Tailwind CSS
-- **Language:** TypeScript
+SupportGenius was built on top of [rag-starter](https://github.com/abhipaddy8/rag-starter) by Abhishek Padiyar (MIT License — see `LICENSE`), which provided the initial project scaffolding and RAG pipeline structure. Since the fork, the project has been substantially customized: the LLM provider was migrated from OpenAI to Google Gemini (new embedding + chat modules), the database schema migrated to 768-dimension vectors, the UI redesigned, the configuration rebranded with a refined support-assistant persona, a 10-article demo knowledge base authored, JSON ingestion added to the CLI, and this documentation rewritten.
 
 ## License
 
-MIT
+MIT — see [LICENSE](./LICENSE).

@@ -1,13 +1,8 @@
-import OpenAI from "openai";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 import { ChatMessage, ChatResponse, Citation, DocumentChunk } from "@/types";
 import { RAG_CONFIG } from "../../rag.config";
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENROUTER_API_KEY || process.env.OPENAI_API_KEY,
-  baseURL: process.env.OPENROUTER_API_KEY
-    ? "https://openrouter.ai/api/v1"
-    : "https://api.openai.com/v1",
-});
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
 
 export async function generateAnswer(
   query: string,
@@ -29,25 +24,24 @@ export async function generateAnswer(
     )
     .join("\n\n");
 
-  const systemMessage = `${RAG_CONFIG.systemPrompt}\n\nCONTEXT FROM HELP ARTICLES:\n${context}`;
-
-  const messages: OpenAI.ChatCompletionMessageParam[] = [
-    { role: "system", content: systemMessage },
-    ...history.slice(-6).map((m) => ({
-      role: m.role as "user" | "assistant",
-      content: m.content,
-    })),
-    { role: "user", content: query },
-  ];
-
-  const completion = await openai.chat.completions.create({
+  const model = genAI.getGenerativeModel({
     model: RAG_CONFIG.llm.model,
-    messages,
-    temperature: RAG_CONFIG.llm.temperature,
-    max_tokens: RAG_CONFIG.llm.maxTokens,
+    systemInstruction: `${RAG_CONFIG.systemPrompt}\n\nCONTEXT FROM HELP ARTICLES:\n${context}`,
+    generationConfig: {
+      temperature: RAG_CONFIG.llm.temperature,
+      maxOutputTokens: RAG_CONFIG.llm.maxTokens,
+    },
   });
 
-  const answer = completion.choices[0].message.content || "";
+  const chat = model.startChat({
+    history: history.slice(-6).map((m) => ({
+      role: m.role === "assistant" ? "model" : "user",
+      parts: [{ text: m.content }],
+    })),
+  });
+
+  const result = await chat.sendMessage(query);
+  const answer = result.response.text();
 
   // Extract citations from the chunks used
   const uniqueArticles = new Map<string, Citation>();

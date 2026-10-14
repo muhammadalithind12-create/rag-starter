@@ -13,9 +13,9 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "RAG Starter — AI Chat with Citations",
+  title: "SupportGenius — AI Support Chat with Citations",
   description:
-    "Open-source RAG chatbot starter kit. Supabase pgvector + Next.js + OpenAI.",
+    "SupportGenius is a RAG-powered customer support chatbot that answers questions from your help docs — with sources. Built with Next.js 16, Supabase pgvector, and Google Gemini.",
 };
 
 export default function RootLayout({
